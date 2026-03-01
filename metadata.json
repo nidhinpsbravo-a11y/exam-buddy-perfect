@@ -1,0 +1,5 @@
+{
+  "name": "EXAM BUDDY",
+  "description": "A professional MCQ exam platform with NTA-style interface, admin management, and automated evaluation.",
+  "requestFramePermissions": []
+}
