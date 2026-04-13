@@ -26,6 +26,9 @@ const ExamInterface: React.FC = () => {
   const timerRef = useRef<NodeJS.Timeout | null>(null);
   const questionStartTimeRef = useRef<number>(Date.now());
 
+  // ✅ FIX: Keep a ref mirror of timePerQuestion so saveProgress always reads latest value
+  const timePerQuestionRef = useRef<Record<string, number>>({});
+
   useEffect(() => {
     if (!exam || !session) {
       navigate('/student');
@@ -33,7 +36,6 @@ const ExamInterface: React.FC = () => {
     }
 
     const initExam = async () => {
-      // Fetch questions (without correct_answer)
       const { data, error } = await supabase
         .from('questions')
         .select('id, display_number, subject, question_type, question_text, question_image_url, option_a_type, option_a_value, option_b_type, option_b_value, option_c_type, option_c_value, option_d_type, option_d_value')
@@ -47,7 +49,6 @@ const ExamInterface: React.FC = () => {
 
       setQuestions(data || []);
       
-      // Bug 2: Preload images
       if (data) {
         const imageUrls: string[] = [];
         data.forEach(q => {
@@ -57,26 +58,25 @@ const ExamInterface: React.FC = () => {
           if (q.option_c_type === 'image') imageUrls.push(q.option_c_value);
           if (q.option_d_type === 'image') imageUrls.push(q.option_d_value);
         });
-
-        // Preload in background
         imageUrls.forEach(url => {
           const img = new Image();
           img.src = url;
         });
       }
       
-      // Load existing session data
       setResponses(session.responses || {});
-      setTimePerQuestion(session.time_per_question || {});
+
+      // ✅ FIX: Load existing time data into BOTH state and ref
+      const existingTime = session.time_per_question || {};
+      setTimePerQuestion(existingTime);
+      timePerQuestionRef.current = existingTime;
       
-      // Calculate time left
       const startTime = new Date(session.started_at).getTime();
       const now = Date.now();
       const elapsedSeconds = Math.floor((now - startTime) / 1000);
       const totalSeconds = exam.duration_minutes * 60;
       setTimeLeft(Math.max(0, totalSeconds - elapsedSeconds));
 
-      // Initialize statuses
       const initialStatuses: Record<string, QuestionStatus> = {};
       data?.forEach(q => {
         if (session.responses?.[q.id]) {
@@ -87,12 +87,14 @@ const ExamInterface: React.FC = () => {
       });
       setStatuses(initialStatuses);
       
+      // ✅ FIX: Reset the question timer AFTER everything is loaded, not at mount
+      questionStartTimeRef.current = Date.now();
+
       setLoading(false);
     };
 
     initExam();
 
-    // Prevent back navigation
     window.history.pushState(null, '', window.location.href);
     const handlePopState = () => {
       window.history.pushState(null, '', window.location.href);
@@ -124,26 +126,35 @@ const ExamInterface: React.FC = () => {
     };
   }, [timeLeft, isSubmitting]);
 
-  // Auto-save every 30 seconds
+  // ✅ FIX: Auto-save no longer depends on timePerQuestion state (uses ref instead)
   useEffect(() => {
     const saveInterval = setInterval(() => {
       saveProgress();
     }, 30000);
     return () => clearInterval(saveInterval);
-  }, [responses, timePerQuestion]);
+  }, [responses]);
 
   const saveProgress = async (final = false) => {
     if (!session) return;
 
-    // Update time for current question
     const now = Date.now();
     const timeSpentOnCurrent = Math.floor((now - questionStartTimeRef.current) / 1000);
-    const currentQId = questions[currentIndex]?.id;
-    
-    const updatedTimePerQuestion = { ...timePerQuestion };
+
+    // ✅ FIX: Read from ref (always current), not from React state (can be stale)
+    const updatedTimePerQuestion = { ...timePerQuestionRef.current };
+
+    // Get current question id from the questions array via a ref-safe approach
+    const currentQId = (document.querySelector('[data-current-qid]') as HTMLElement)?.dataset?.currentQid;
+
     if (currentQId) {
       updatedTimePerQuestion[currentQId] = (updatedTimePerQuestion[currentQId] || 0) + timeSpentOnCurrent;
-      questionStartTimeRef.current = now; // Reset for next interval
+      
+      // ✅ FIX: Reset the ref so we don't double-count on next save
+      questionStartTimeRef.current = now;
+
+      // ✅ FIX: Update BOTH the ref and React state so everything stays in sync
+      timePerQuestionRef.current = updatedTimePerQuestion;
+      setTimePerQuestion(updatedTimePerQuestion);
     }
 
     const updateData: any = {
@@ -175,7 +186,6 @@ const ExamInterface: React.FC = () => {
   const handleNext = () => {
     const currentQId = questions[currentIndex].id;
     
-    // Update status if not answered
     if (!responses[currentQId] && statuses[currentQId] !== 'marked') {
       setStatuses(prev => ({ ...prev, [currentQId]: 'not_answered' }));
     }
@@ -186,6 +196,7 @@ const ExamInterface: React.FC = () => {
     }
   };
 
+  // ✅ FIX: handleSaveAndNext no longer calls saveProgress() — updateTimeSpent inside handleNext handles time correctly
   const handleSaveAndNext = () => {
     const currentQId = questions[currentIndex].id;
     if (responses[currentQId]) {
@@ -193,8 +204,6 @@ const ExamInterface: React.FC = () => {
     } else {
       setStatuses(prev => ({ ...prev, [currentQId]: 'not_answered' }));
     }
-    // Fire and forget save in background
-    saveProgress();
     handleNext();
   };
 
@@ -205,8 +214,6 @@ const ExamInterface: React.FC = () => {
     } else {
       setStatuses(prev => ({ ...prev, [currentQId]: 'marked' }));
     }
-    // Fire and forget save in background
-    saveProgress();
     handleNext();
   };
 
@@ -225,10 +232,14 @@ const ExamInterface: React.FC = () => {
     const timeSpent = Math.floor((now - questionStartTimeRef.current) / 1000);
     const currentQId = questions[currentIndex].id;
     
-    setTimePerQuestion(prev => ({
-      ...prev,
-      [currentQId]: (prev[currentQId] || 0) + timeSpent
-    }));
+    // ✅ FIX: Update BOTH ref and state together
+    const updated = {
+      ...timePerQuestionRef.current,
+      [currentQId]: (timePerQuestionRef.current[currentQId] || 0) + timeSpent
+    };
+    timePerQuestionRef.current = updated;
+    setTimePerQuestion(updated);
+
     questionStartTimeRef.current = now;
   };
 
@@ -294,7 +305,11 @@ const ExamInterface: React.FC = () => {
       {/* Main Content */}
       <main className="flex-1 flex overflow-hidden">
         {/* Left Column (70%) */}
-        <div className="w-[70%] flex flex-col h-full bg-white border-r border-slate-200 overflow-hidden">
+        {/* ✅ FIX: data-current-qid attribute lets saveProgress know which question is active */}
+        <div
+          className="w-[70%] flex flex-col h-full bg-white border-r border-slate-200 overflow-hidden"
+          data-current-qid={currentQuestion.id}
+        >
           {/* Question Header */}
           <div className="px-6 py-2 flex items-center justify-between border-b border-slate-50 flex-shrink-0">
             <h2 className="text-base font-bold text-blue-600">Question {currentQuestion.display_number}</h2>
@@ -338,7 +353,6 @@ const ExamInterface: React.FC = () => {
                         : "border-slate-100 bg-white hover:border-blue-200 hover:bg-slate-50"
                     )}
                   >
-                    {/* Letter Indicator - Absolute top-left */}
                     <div className={cn(
                       "absolute top-3 left-3 w-7 h-7 rounded-full flex items-center justify-center text-xs font-black transition-colors",
                       isSelected ? "bg-blue-600 text-white" : "bg-slate-100 text-slate-400 group-hover:bg-slate-200"
